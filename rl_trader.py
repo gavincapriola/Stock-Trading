@@ -48,17 +48,17 @@ class ReplayBuffer:
         self.acts_buf[self.ptr] = act
         self.rews_buf[self.ptr] = rew
         self.done_buf[self.ptr] = done
-        self.ptr = (self.ptr + 1) % self.max_size
-        self.size = min(self.size + 1, self.max_size)
+        self.ptr = (self.ptr+1) % self.max_size
+        self.size = min(self.size+1, self.max_size)
     
     def sample_batch(self, batch_size=32):
         """Sample a batch of transitions from the replay buffer."""
         idxs = np.random.randint(0, self.size, size=batch_size)
-        return dict(obs1=self.obs1_buf[idxs],
-                    obs2=self.obs2_buf[idxs],
-                    acts=self.acts_buf[idxs],
-                    rews=self.rews_buf[idxs],
-                    done=self.done_buf[idxs])
+        return dict(s=self.obs1_buf[idxs],
+                    s2=self.obs2_buf[idxs],
+                    a=self.acts_buf[idxs],
+                    r=self.rews_buf[idxs],
+                    d=self.done_buf[idxs])
 
 
 def get_scaler(env):
@@ -70,10 +70,10 @@ def get_scaler(env):
         states.append(state)
         if done:
             break
+        
     scaler = StandardScaler()
     scaler.fit(states)
     return scaler
-
 
 def maybe_make_dir(directory):
     """Makes a directory if it doesn't already exist."""
@@ -82,9 +82,9 @@ def maybe_make_dir(directory):
 
 
 class MLP(nn.Module):
-    def __init__(self, n_inputs, n_actions, n_hidden_layers=1, hidden_dim=32):
+    def __init__(self, n_inputs, n_action, n_hidden_layers=1, hidden_dim=32):
         super(MLP, self).__init__()
-        
+
         M = n_inputs
         self.layers = []
         for _ in range(n_hidden_layers):
@@ -92,12 +92,12 @@ class MLP(nn.Module):
             M = hidden_dim
             self.layers.append(layer)
             self.layers.append(nn.ReLU())
-            
-        self.layers.append(nn.Linear(M, n_actions))
+
+        self.layers.append(nn.Linear(M, n_action))
         self.layers = nn.Sequential(*self.layers)
 
-    def forward(self, x):
-        return self.layers(x)
+    def forward(self, X):
+        return self.layers(X)
 
     def save_weights(self, path):
         torch.save(self.state_dict(), path)
@@ -111,7 +111,7 @@ def predict(model, np_states):
     with torch.no_grad():
         inputs = torch.from_numpy(np_states.astype(np.float32))
         output = model(inputs)
-        # print(f'output: {output}')
+        # print("output:", output)
         return output.numpy()
     
 
@@ -205,7 +205,7 @@ class MultiStockEnv:
         # get the new value after taking the action
         cur_val = self._get_val()
 
-        # reward is the increase in portfolio value
+        # reward is the increase in porfolio value
         reward = cur_val - prev_val
 
         # done if we have run out of data
@@ -237,16 +237,16 @@ class MultiStockEnv:
         # - hold second stock
         # - sell third stock
         action_vec = self.action_list[action]
-        
+
         # determine which stocks to buy or sell
-        sell_index = [] # stores index of stocks to sell
-        buy_index = [] # stores index of stocks to buy
+        sell_index = [] # stores index of stocks we want to sell
+        buy_index = [] # stores index of stocks we want to buy
         for i, a in enumerate(action_vec):
             if a == 0:
                 sell_index.append(i)
             elif a == 2:
                 buy_index.append(i)
-                
+
         # sell any stocks we want to sell
         # then buy any stocks we want to buy
         if sell_index:
@@ -256,7 +256,7 @@ class MultiStockEnv:
                 self.stock_owned[i] = 0
         if buy_index:
             # NOTE: when buying, we will loop through each stock we want to buy,
-            # and buy one share at a time until we run out of cash
+            #       and buy one share at a time until we run out of cash
             can_buy = True
             while can_buy:
                 for i in buy_index:
@@ -272,7 +272,7 @@ class DQNAgent(object):
         self.state_size = state_size
         self.action_size = action_size
         self.memory = ReplayBuffer(state_size, action_size, size=500)
-        self.gamma = 0.95    # discount rate
+        self.gamma = 0.95  # discount rate
         self.epsilon = 1.0  # exploration rate
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.995
@@ -281,6 +281,7 @@ class DQNAgent(object):
         # loss and optimizer
         self.criterion = nn.MSELoss()
         self.optimizer = torch.optim.Adam(self.model.parameters())
+
 
     def update_replay_memory(self, state, action, reward, next_state, done):
         self.memory.store(state, action, reward, next_state, done)
@@ -291,12 +292,13 @@ class DQNAgent(object):
         act_values = predict(self.model, state)
         return np.argmax(act_values[0])  # returns action
 
+
     def replay(self, batch_size=32):
-        # first check to see if replay buffer contains enough data
+        # first check if replay buffer contains enough data
         if self.memory.size < batch_size:
             return
 
-        # sample a batch of data from the replay buffer
+        # sample a batch of data from the replay memory
         minibatch = self.memory.sample_batch(batch_size)
         states = minibatch['s']
         actions = minibatch['a']
@@ -304,9 +306,9 @@ class DQNAgent(object):
         next_states = minibatch['s2']
         done = minibatch['d']
 
-        # Calculate the tentative target: Q(s',a)
-        target = rewards + (1 - done) * self.gamma * np.amax(self.model.predict(next_states), axis=1)
-
+        # Calculate the target: Q(s',a)
+        target = rewards + (1 - done) * self.gamma * np.amax(predict(self.model, next_states), axis=1)
+        
         # With the PyTorch API, it's simplest to have the target be the 
         # same shape as the predictions.
         # However, we only need to update the network for the actions
@@ -320,7 +322,7 @@ class DQNAgent(object):
 
         # Run one training step
         train_one_step(self.model, self.criterion, 
-                       self.optimizer, states, target_full)
+                    self.optimizer, states, target_full)
 
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
